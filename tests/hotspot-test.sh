@@ -458,24 +458,27 @@ const panel = fs.readFileSync(dir + "/Panel.qml", "utf8")
 const source = panel.match(/function updateHotspot\(raw\) \{[\s\S]*?\n  \}/)
 if (!source) { process.stderr.write("FAIL: the panel has no updateHotspot\n"); process.exit(1) }
 const state = {
-  hotspot: {}, hotspotLoaded: false, hotspotEdited: true, hotspotSsid: "Typed Name", hotspotPassword: "typedpassword",
+  hotspot: {}, hotspotLoaded: false, hotspotEditedFields: { ssid: true }, hotspotSsid: "Typed Name", hotspotPassword: "stalepassword",
   hotspotSavedSsid: "", hotspotSavedPassword: "", hotspotMaxClients: "", hotspotBand: "5", hotspotSecurity: "wpa3",
   hotspotAvailableBands: [], Model, syncWifiNetworks() {}, refreshWifiList() {},
 }
 const run = raw => new Function("state", "raw", "with (state) {\n" + source[0] + "\nupdateHotspot(raw)\n}")(state, raw)
 const saved = "ap_capable\t1\nactive\t0\nconfigured\t1\niface\twlo1\nssid\tSaved Name\nband\t2.4\nap_bands\t2.4,5\npassword\tsavedpassword\nmax_clients\t4\nsecurity\tmixed\n"
 run(saved)
-if (state.hotspotSsid !== "Typed Name" || state.hotspotPassword !== "typedpassword" || state.hotspotBand !== "5" || state.hotspotSecurity !== "wpa3" || state.hotspotMaxClients !== "") {
-  process.stderr.write("FAIL: a late first status replaced fields the user had edited\n"); process.exit(1)
+if (state.hotspotSsid !== "Typed Name") {
+  process.stderr.write("FAIL: a late first status replaced the field the user had edited\n"); process.exit(1)
+}
+if (state.hotspotPassword !== "savedpassword" || state.hotspotBand !== "2.4" || state.hotspotSecurity !== "mixed" || state.hotspotMaxClients !== "4") {
+  process.stderr.write("FAIL: an edit to one field stopped the others from loading\n"); process.exit(1)
 }
 if (state.hotspotSavedSsid !== "Saved Name") { process.stderr.write("FAIL: the saved name did not follow the profile\n"); process.exit(1) }
-Object.assign(state, { hotspotLoaded: false, hotspotEdited: false })
+Object.assign(state, { hotspotLoaded: false, hotspotEditedFields: {} })
 run(saved)
 if (state.hotspotSsid !== "Saved Name" || state.hotspotMaxClients !== "4" || state.hotspotSecurity !== "mixed") {
   process.stderr.write("FAIL: an untouched panel was not filled from the profile\n"); process.exit(1)
 }
 ' "${PLUGIN%/*}"
-printf 'PASS: a late first status keeps fields the user already edited\n'
+printf 'PASS: a late first status keeps the fields the user edited and loads the rest\n'
 
 # Forwarding the plugin turned on goes back off with the AP, unless something
 # else still routes; forwarding that was already on stays on.

@@ -140,9 +140,18 @@ Panel {
   // prefill the editable fields once per open; after that the poll must leave
   // them alone so it doesn't fight the user's typing and revert the values.
   property bool hotspotLoaded: false
-  // Set once the user changes a hotspot field, so the saved settings a status
-  // read brings back never overwrite what they have typed since opening.
-  property bool hotspotEdited: false
+  // The hotspot fields the user has changed since opening the panel, by name.
+  // The first status read fills only the others, so a late read never
+  // overwrites an edit, and an edit to one field never stops the rest from
+  // loading what the profile holds now.
+  property var hotspotEditedFields: ({})
+  function markHotspotEdited(field) {
+    var next = Object.assign({}, hotspotEditedFields)
+    next[field] = true
+    hotspotEditedFields = next
+  }
+  // Give keys back to the panel, so a second Escape closes it.
+  function focusPanelKeys() { keyCatcher.forceActiveFocus() }
   // The participant rename field lives in a row component, out of reach of
   // the key catcher's binding, so it reports its focus here.
   property bool hotspotAliasFieldFocused: false
@@ -415,7 +424,7 @@ Panel {
       refreshHotspot()
       hotspotFocusIndex = 0
       hotspotLoaded = false
-      hotspotEdited = false
+      hotspotEditedFields = ({})
       selectedIndex = wifiNetworks.length > 0 ? 0 : -1
       wifiActionFocused = false
       focusSection = wifiNetworks.length > 0 ? "wifi" : "dns"
@@ -987,15 +996,13 @@ Panel {
     if (!hotspotLoaded) {
       hotspotLoaded = true
       // What the user changed while this first read was running stays.
-      if (!hotspotEdited) {
-        if (next.ssid) hotspotSsid = next.ssid
-        if (next.password) hotspotPassword = next.password
-        var maxClients = Model.hotspotMaxClients(next)
-        if (maxClients !== "") hotspotMaxClients = maxClients
-        var band = Model.hotspotDefaultBand(next)
-        if (band !== "") hotspotBand = band
-        hotspotSecurity = Model.hotspotSecurity(next)
-      }
+      if (!hotspotEditedFields.ssid && next.ssid) hotspotSsid = next.ssid
+      if (!hotspotEditedFields.password && next.password) hotspotPassword = next.password
+      var maxClients = Model.hotspotMaxClients(next)
+      if (!hotspotEditedFields.limit && maxClients !== "") hotspotMaxClients = maxClients
+      var band = Model.hotspotDefaultBand(next)
+      if (!hotspotEditedFields.band && band !== "") hotspotBand = band
+      if (!hotspotEditedFields.security) hotspotSecurity = Model.hotspotSecurity(next)
       hotspotSavedSsid = next.ssid || hotspotSavedSsid
       hotspotSavedPassword = next.password || hotspotSavedPassword
     }
@@ -1055,13 +1062,13 @@ Panel {
   function setHotspotBand(band) {
     if (!band || hotspotBusy) return
     if (hotspotAvailableBands.indexOf(band) < 0) return
-    hotspotEdited = true
+    markHotspotEdited("band")
     hotspotBand = band
   }
 
   function setHotspotSecurity(security) {
     if (hotspotBusy || ["wpa2", "mixed", "wpa3"].indexOf(security) < 0) return
-    hotspotEdited = true
+    markHotspotEdited("security")
     hotspotSecurity = security
   }
 
@@ -1094,7 +1101,7 @@ Panel {
 
   // Stepper for the participant cap: minus at 1 drops back to unlimited.
   function bumpHotspotMaxClients(delta) {
-    hotspotEdited = true
+    markHotspotEdited("limit")
     hotspotMaxClients = Model.hotspotBumpLimit(hotspotMaxClients, delta, 32)
   }
 
@@ -1316,7 +1323,7 @@ Panel {
       onStreamFinished: {
         var pw = String(text || "").replace(/\s+/g, "").trim()
         if (pw !== "") {
-          root.hotspotEdited = true
+          root.markHotspotEdited("password")
           root.hotspotPassword = pw
           // A generated key must reach NetworkManager too, otherwise the AP
           // keeps the previous passphrase and clients fail to authenticate.
@@ -2195,9 +2202,10 @@ Panel {
             verticalPadding: Style.spacing.controlPaddingY
             text: root.hotspotSsid
             onTextChanged: if (text !== root.hotspotSsid) {
-              root.hotspotEdited = true
+              root.markHotspotEdited("ssid")
               root.hotspotSsid = text
             }
+            Keys.onEscapePressed: root.focusPanelKeys()
             // Credentials reach NetworkManager when editing finishes, not on
             // every keystroke: the field is disabled while an apply runs, so
             // per-character commits would yank focus out from under the typist.
@@ -2222,9 +2230,10 @@ Panel {
               verticalPadding: Style.spacing.controlPaddingY
               text: root.hotspotPassword
               onTextChanged: if (text !== root.hotspotPassword) {
-                root.hotspotEdited = true
+                root.markHotspotEdited("password")
                 root.hotspotPassword = text
               }
+              Keys.onEscapePressed: root.focusPanelKeys()
               onAccepted: root.commitHotspotCredentials()
               onActiveFocusChanged: if (!activeFocus) root.commitHotspotCredentials()
             }
@@ -2594,7 +2603,10 @@ delegate: Item {
           enabled: !root.hotspotAliasBusy
           onTextChanged: if (participantRow.editing && text !== root.hotspotAliasDraft) root.hotspotAliasDraft = text
           onAccepted: root.saveHotspotAlias(participantRow.client)
-          Keys.onEscapePressed: root.cancelHotspotAliasEdit()
+          Keys.onEscapePressed: {
+            root.cancelHotspotAliasEdit()
+            root.focusPanelKeys()
+          }
           onActiveFocusChanged: root.hotspotAliasFieldFocused = activeFocus
         }
 
