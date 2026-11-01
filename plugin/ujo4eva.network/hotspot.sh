@@ -537,16 +537,73 @@ has_terminal() {
   [[ -t 0 || -t 2 ]]
 }
 
-ensure_ipv4_forwarding() {
-  ipv4_forwarding_enabled && return
-  local -a setter=(sysctl -q -w net.ipv4.ip_forward=1)
+# Set IPv4 forwarding to $1 (0 or 1), as root.
+set_ipv4_forwarding() {
+  local -a setter=(sysctl -q -w "net.ipv4.ip_forward=$1")
   if (( EUID == 0 )); then
     "${setter[@]}" >/dev/null
   elif has_terminal; then
     sudo "${setter[@]}" >/dev/null
   else
     pkexec "${setter[@]}" >/dev/null
-  fi || fail "could not enable IPv4 forwarding for hotspot internet access"
+  fi
+}
+
+# Marks that this plugin turned forwarding on, so turning the hotspot off can
+# turn it back off. It lives in the runtime directory, which is cleared at
+# reboot just like the sysctl, so a stale marker never outlives the setting.
+forwarding_marker() {
+  printf '%s/ujo4eva-hotspot-forwarding' "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+}
+
+ensure_ipv4_forwarding() {
+  ipv4_forwarding_enabled && return
+  set_ipv4_forwarding 1 || fail "could not enable IPv4 forwarding for hotspot internet access"
+  : >"$(forwarding_marker)" 2>/dev/null ||
+    echo "hotspot: IPv4 forwarding is on, but it will not be turned off when the hotspot stops" >&2
+}
+
+# Another router that still needs forwarding: a second NetworkManager shared
+# connection, or a container/VM bridge. The marker only says who turned it on.
+forwarding_other_user() {
+  local name link
+  while IFS= read -r name; do
+    [[ -n $name && $name != "$PROFILE" ]] || continue
+    if [[ $(nm_get ipv4.method connection show "$name" | head -n 1) == shared ]]; then
+      printf 'NetworkManager connection %s\n' "$name"
+      return 0
+    fi
+  done < <(nm_get NAME connection show --active)
+  while IFS= read -r link; do
+    case $link in
+      docker* | br-* | virbr* | podman* | cni* | lxcbr* | incusbr* | lxdbr*)
+        printf 'interface %s\n' "$link"
+        return 0
+        ;;
+    esac
+  done < <(ip -o link show 2>/dev/null | awk -F': ' '{ sub(/@.*/, "", $2); print $2 }')
+  return 1
+}
+
+# Undo what ensure_ipv4_forwarding turned on, once the AP is down for good.
+restore_ipv4_forwarding() {
+  local marker other
+  marker=$(forwarding_marker)
+  [[ -e $marker ]] || return 0
+  if ! ipv4_forwarding_enabled; then
+    rm -f "$marker"
+    return 0
+  fi
+  if other=$(forwarding_other_user); then
+    echo "hotspot: leaving IPv4 forwarding on; still routing for $other" >&2
+    rm -f "$marker"
+    return 0
+  fi
+  set_ipv4_forwarding 0 || {
+    echo "hotspot: could not turn IPv4 forwarding back off" >&2
+    return 1
+  }
+  rm -f "$marker"
 }
 
 # Password arrives on stdin (never argv). band is optional, default 2.4.
@@ -562,6 +619,7 @@ start() {
   apply "$ssid" "$band" "$max" "$security"
 
   if ! nmcli connection up "$PROFILE" >/dev/null 2>&1; then
+    restore_ipv4_forwarding || true
     fail "could not start hotspot (does this adapter allow AP mode?)"
   fi
 }
@@ -570,6 +628,8 @@ stop() {
   if profile_active; then
     nmcli connection down "$PROFILE" >/dev/null 2>&1 || true
   fi
+  # Forwarding routes for every interface, so it goes off with the AP.
+  profile_active || restore_ipv4_forwarding
 }
 
 # The menu entry: flip the current state. When nothing has been configured
@@ -704,8 +764,10 @@ apply() {
   fi
   if ((bounce)) && profile_active; then
     nmcli connection down "$PROFILE" >/dev/null 2>&1 || true
-    nmcli connection up "$PROFILE" >/dev/null 2>&1 ||
+    if ! nmcli connection up "$PROFILE" >/dev/null 2>&1; then
+      restore_ipv4_forwarding || true
       fail "settings saved but the hotspot could not be restarted"
+    fi
   fi
 }
 

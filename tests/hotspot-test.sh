@@ -6,7 +6,9 @@ STATE_DIR=$(mktemp -d)
 trap 'rm -rf "$STATE_DIR"' EXIT
 printf '0\n' >"$STATE_DIR/ip-forward"
 mkdir -p "$STATE_DIR/runtime"
-export STATE_DIR
+# The plugin keeps its forwarding marker and hostname cache in the runtime
+# directory; keep the test's out of the real one.
+export STATE_DIR XDG_RUNTIME_DIR="$STATE_DIR/runtime"
 
 # The mocks reach the plugin through `export -f` below.
 # shellcheck disable=SC2329
@@ -51,6 +53,10 @@ nmcli() {
     *" -g 802-11-wireless-security.pmf connection show "*)
       cat "$STATE_DIR/pmf" 2>/dev/null || true
       ;;
+    *" -g NAME connection show --active "*)
+      [[ -e $STATE_DIR/ap-down ]] || printf '%s\n' ujo4eva-hotspot
+      [[ -z ${MOCK_OTHER_SHARED:-} ]] || printf '%s\n' "$MOCK_OTHER_SHARED"
+      ;;
     *" -g NAME connection show "*)
       # MOCK_NO_PROFILE stands in for a machine that has never saved a hotspot.
       [[ -n ${MOCK_NO_PROFILE:-} ]] || printf '%s\n' ujo4eva-hotspot
@@ -62,7 +68,17 @@ nmcli() {
       printf '%s\n' wlo1
       ;;
     *" -t -f NAME connection show --active "*)
-      printf '%s\n' ujo4eva-hotspot
+      [[ -e $STATE_DIR/ap-down ]] || printf '%s\n' ujo4eva-hotspot
+      ;;
+    *" -g ipv4.method connection show "*)
+      [[ -z ${MOCK_OTHER_SHARED:-} || " $* " != *" $MOCK_OTHER_SHARED "* ]] || printf '%s\n' shared
+      ;;
+    *" connection down "*)
+      touch "$STATE_DIR/ap-down"
+      ;;
+    *" connection up "*)
+      [[ -z ${MOCK_UP_FAILS:-} ]] || return 1
+      rm -f "$STATE_DIR/ap-down"
       ;;
     *" -f DEVICE,TYPE device status "*)
       printf '%s\n' wlo1:wifi
@@ -88,6 +104,9 @@ avahi-browse() {
 ip() {
   if [[ ${1:-} == -j ]]; then
     printf '%s\n' '[{"addr_info":[{"family":"inet","local":"10.42.0.1"}]}]'
+  elif [[ $* == "-o link show" ]]; then
+    printf '%s\n' '1: lo: <LOOPBACK,UP> mtu 65536' '2: wlo1: <BROADCAST,UP> mtu 1500'
+    [[ -z ${MOCK_LINK:-} ]] || printf '3: %s@if4: <BROADCAST,UP> mtu 1500\n' "$MOCK_LINK"
   else
     command /usr/bin/ip "$@"
   fi
@@ -104,6 +123,10 @@ sysctl() {
         ;;
       net.ipv4.ip_forward=1)
         printf '1\n' >"$STATE_DIR/ip-forward"
+        return
+        ;;
+      net.ipv4.ip_forward=0)
+        printf '0\n' >"$STATE_DIR/ip-forward"
         return
         ;;
     esac
@@ -453,3 +476,49 @@ if (state.hotspotSsid !== "Saved Name" || state.hotspotMaxClients !== "4" || sta
 }
 ' "${PLUGIN%/*}"
 printf 'PASS: a late first status keeps fields the user already edited\n'
+
+# Forwarding the plugin turned on goes back off with the AP, unless something
+# else still routes; forwarding that was already on stays on.
+forwarding_marker="$XDG_RUNTIME_DIR/ujo4eva-hotspot-forwarding"
+start_then_stop() {
+  printf '0\n' >"$STATE_DIR/ip-forward"
+  rm -f "$STATE_DIR/ap-down" "$forwarding_marker"
+  printf '%s\n' test-password | bash "$PLUGIN" start TestHotspot 2.4 unlimited 2>/dev/null
+  [[ -e $forwarding_marker ]] || { printf 'FAIL: start did not mark forwarding as its own\n' >&2; exit 1; }
+  bash "$PLUGIN" stop 2>"$STATE_DIR/stop.err"
+}
+start_then_stop
+if [[ $(<"$STATE_DIR/ip-forward") != 0 || -e $forwarding_marker ]]; then
+  printf 'FAIL: stop left the forwarding the hotspot turned on\n' >&2
+  exit 1
+fi
+MOCK_LINK=docker0 start_then_stop
+if [[ $(<"$STATE_DIR/ip-forward") != 1 ]] || ! grep -q 'still routing for interface docker0' "$STATE_DIR/stop.err"; then
+  printf 'FAIL: stop turned forwarding off under a container bridge\n' >&2
+  exit 1
+fi
+MOCK_OTHER_SHARED=Tether start_then_stop
+if [[ $(<"$STATE_DIR/ip-forward") != 1 ]]; then
+  printf 'FAIL: stop turned forwarding off under another shared connection\n' >&2
+  exit 1
+fi
+printf '1\n' >"$STATE_DIR/ip-forward"
+rm -f "$STATE_DIR/ap-down" "$forwarding_marker"
+printf '%s\n' test-password | bash "$PLUGIN" start TestHotspot 2.4 unlimited
+bash "$PLUGIN" stop
+if [[ $(<"$STATE_DIR/ip-forward") != 1 || -e $forwarding_marker ]]; then
+  printf 'FAIL: stop turned off forwarding the hotspot did not turn on\n' >&2
+  exit 1
+fi
+printf '0\n' >"$STATE_DIR/ip-forward"
+rm -f "$STATE_DIR/ap-down" "$forwarding_marker"
+if printf '%s\n' test-password | MOCK_UP_FAILS=1 bash "$PLUGIN" start TestHotspot 2.4 unlimited 2>/dev/null; then
+  printf 'FAIL: a failed AP start reported success\n' >&2
+  exit 1
+fi
+if [[ $(<"$STATE_DIR/ip-forward") != 0 || -e $forwarding_marker ]]; then
+  printf 'FAIL: a failed start left forwarding on\n' >&2
+  exit 1
+fi
+rm -f "$STATE_DIR/ap-down"
+printf 'PASS: forwarding the hotspot turned on goes back off with it\n'
