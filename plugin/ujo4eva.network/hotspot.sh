@@ -238,15 +238,44 @@ shared_base() {
   echo "$base"
 }
 
-# DHCP range handing out exactly N leases: <base>.2 .. <base>.(N+1)
-# (.1 is the gateway). Users beyond the Nth associate but get no address.
+# The hotspot's own host number on the shared /24: 1 unless the profile keeps
+# a custom address.
+shared_gateway_host() {
+  local addr
+  addr=$(nm_get ipv4.addresses connection show "$PROFILE")
+  if [[ -z $addr ]]; then
+    echo 1
+    return 0
+  fi
+  addr=${addr%% *}
+  addr=${addr%%/*}
+  addr=${addr##*.}
+  if ! [[ $addr =~ ^[0-9]{1,3}$ ]] || ((10#$addr > 255)); then
+    fail "cannot parse hotspot address"
+  fi
+  echo $((10#$addr))
+}
+
+# DHCP range handing out exactly N leases, never the hotspot's own address:
+# they follow the gateway (.2 .. .(N+1) for the usual .1), or sit below it when
+# a custom address leaves no room above. Users beyond the Nth associate but get
+# no address.
 dhcp_range_for() {
-  local n=$1 base
+  local n=$1 base gateway first last
   if ! [[ $n =~ ^[0-9]+$ ]] || ((n < 1 || n > 253)); then
     fail "participant limit must be 1-253"
   fi
-  base=$(shared_base)
-  echo "$base.2,$base.$((n + 1))"
+  n=$((10#$n))
+  base=$(shared_base) || return 1
+  gateway=$(shared_gateway_host) || return 1
+  if ((gateway + n <= 254)); then
+    first=$((gateway + 1)) last=$((gateway + n))
+  elif ((gateway - n >= 1)); then
+    first=$((gateway - n)) last=$((gateway - 1))
+  else
+    fail "a $n-device limit does not fit beside the hotspot address $base.$gateway"
+  fi
+  echo "$base.$first,$base.$last"
 }
 
 upstream_type() {
@@ -280,24 +309,44 @@ valid_participant_alias() {
   [[ -n $alias && ${#alias} -le 64 && $alias != *[[:cntrl:]]* ]]
 }
 
+# The alias file is rewritten whole, so two writers (two panels, a panel and a
+# terminal) take turns: each reads the file the last one left.
+lock_participant_aliases() {
+  local file=$1 fd
+  mkdir -p "${file%/*}" || fail "could not create participant alias directory"
+  exec {fd}>>"$file.lock" || fail "could not open the participant alias lock"
+  flock -w 10 "$fd" || fail "another participant alias change is still running"
+}
+
+# Copy every valid record except $mac from $file into $tmp. A file that can't
+# be read fails the change instead of being rewritten from nothing, which would
+# drop every other name.
+copy_other_participant_aliases() {
+  local file=$1 tmp=$2 mac=$3 existing_mac existing_alias
+  [[ -e $file ]] || return 0
+  [[ -f $file && -r $file ]] || return 1
+  while IFS=$'\t' read -r existing_mac existing_alias; do
+    existing_mac=${existing_mac,,}
+    valid_participant_alias "$existing_alias" || continue
+    [[ $existing_mac =~ ^[0-9a-f]{2}(:[0-9a-f]{2}){5}$ ]] || continue
+    [[ $existing_mac == "$mac" ]] && continue
+    printf '%s\t%s\n' "$existing_mac" "$existing_alias" >>"$tmp" || return 1
+  done <"$file"
+}
+
 set_participant_alias() {
-  local mac alias file tmp existing_mac existing_alias
+  local mac alias file tmp
   mac=$(normalize_participant_mac "${1:-}") || fail "invalid participant MAC"
   IFS= read -r alias || true
   alias=$(trim_participant_alias "$alias")
   valid_participant_alias "$alias" || fail "participant alias must be 1-64 characters without control characters"
   file=$(participant_alias_file)
   umask 077
-  mkdir -p "${file%/*}" || fail "could not create participant alias directory"
+  lock_participant_aliases "$file"
   tmp=$(mktemp "${file}.XXXXXX") || fail "could not create participant alias file"
-  if [[ -f $file ]]; then
-    while IFS=$'\t' read -r existing_mac existing_alias; do
-      existing_mac=${existing_mac,,}
-      valid_participant_alias "$existing_alias" || continue
-      [[ $existing_mac =~ ^[0-9a-f]{2}(:[0-9a-f]{2}){5}$ ]] || continue
-      [[ $existing_mac == "$mac" ]] && continue
-      printf '%s\t%s\n' "$existing_mac" "$existing_alias" >>"$tmp"
-    done <"$file"
+  if ! copy_other_participant_aliases "$file" "$tmp" "$mac"; then
+    rm -f "$tmp"
+    fail "could not read the participant alias file; it was left as it is"
   fi
   printf '%s\t%s\n' "$mac" "$alias" >>"$tmp"
   if ! mv -f "$tmp" "$file"; then
@@ -307,19 +356,17 @@ set_participant_alias() {
 }
 
 remove_participant_alias() {
-  local mac file tmp existing_mac existing_alias
+  local mac file tmp
   mac=$(normalize_participant_mac "${1:-}") || fail "invalid participant MAC"
   file=$(participant_alias_file)
-  [[ -f $file ]] || return 0
+  [[ -e $file ]] || return 0
   umask 077
+  lock_participant_aliases "$file"
   tmp=$(mktemp "${file}.XXXXXX") || fail "could not create participant alias file"
-  while IFS=$'\t' read -r existing_mac existing_alias; do
-    existing_mac=${existing_mac,,}
-    valid_participant_alias "$existing_alias" || continue
-    [[ $existing_mac =~ ^[0-9a-f]{2}(:[0-9a-f]{2}){5}$ ]] || continue
-    [[ $existing_mac == "$mac" ]] && continue
-    printf '%s\t%s\n' "$existing_mac" "$existing_alias" >>"$tmp"
-  done <"$file"
+  if ! copy_other_participant_aliases "$file" "$tmp" "$mac"; then
+    rm -f "$tmp"
+    fail "could not read the participant alias file; it was left as it is"
+  fi
   if ! mv -f "$tmp" "$file"; then
     rm -f "$tmp"
     fail "could not remove participant alias"
@@ -483,12 +530,19 @@ ipv4_forwarding_enabled() {
   [[ $(sysctl -n net.ipv4.ip_forward 2>/dev/null || true) == 1 ]]
 }
 
+# A terminal to type a password in. start reads the hotspot password from
+# stdin, so stdin is a pipe even when the user sits at a terminal; sudo prompts
+# on the terminal itself, so stderr being one counts too.
+has_terminal() {
+  [[ -t 0 || -t 2 ]]
+}
+
 ensure_ipv4_forwarding() {
   ipv4_forwarding_enabled && return
   local -a setter=(sysctl -q -w net.ipv4.ip_forward=1)
   if (( EUID == 0 )); then
     "${setter[@]}" >/dev/null
-  elif [[ -t 0 ]]; then
+  elif has_terminal; then
     sudo "${setter[@]}" >/dev/null
   else
     pkexec "${setter[@]}" >/dev/null

@@ -55,6 +55,9 @@ nmcli() {
       # MOCK_NO_PROFILE stands in for a machine that has never saved a hotspot.
       [[ -n ${MOCK_NO_PROFILE:-} ]] || printf '%s\n' ujo4eva-hotspot
       ;;
+    *" -g ipv4.addresses connection show "*)
+      cat "$STATE_DIR/addresses" 2>/dev/null || true
+      ;;
     *" -g GENERAL.DEVICE connection show "*)
       printf '%s\n' wlo1
       ;;
@@ -108,14 +111,20 @@ sysctl() {
   return 1
 }
 
+# Both run the command; each notes its name so a test can tell which prompt
+# the plugin chose.
 pkexec() {
   local command=$1
   shift
+  printf 'pkexec\n' >>"$STATE_DIR/prompts"
   "$command" "$@"
 }
 
 sudo() {
-  pkexec "$@"
+  local command=$1
+  shift
+  printf 'sudo\n' >>"$STATE_DIR/prompts"
+  "$command" "$@"
 }
 
 export -f iw nmcli ip journalctl avahi-browse sysctl pkexec sudo
@@ -344,3 +353,103 @@ if [[ $output != *"dnsmasq is required"* ]]; then
   exit 1
 fi
 printf 'PASS: hotspot start without dnsmasq names the missing package\n'
+
+# A password piped in from a terminal still prompts there: sudo, not pkexec.
+printf '0\n' >"$STATE_DIR/ip-forward"
+: >"$STATE_DIR/prompts"
+script -qec "bash -c 'printf \"%s\\n\" test-password | bash \"$PLUGIN\" start TestHotspot 2.4 unlimited'" /dev/null >/dev/null </dev/null
+if [[ $(<"$STATE_DIR/prompts") != sudo ]]; then
+  printf 'FAIL: a terminal with piped stdin did not prompt with sudo: %s\n' "$(<"$STATE_DIR/prompts")" >&2
+  exit 1
+fi
+printf '0\n' >"$STATE_DIR/ip-forward"
+: >"$STATE_DIR/prompts"
+# stdin is the password pipe and stderr goes to a file: no terminal anywhere.
+printf '%s\n' test-password | bash "$PLUGIN" start TestHotspot 2.4 unlimited 2>"$STATE_DIR/no-terminal.err"
+if [[ $(<"$STATE_DIR/prompts") != pkexec ]]; then
+  printf 'FAIL: no terminal did not prompt with pkexec: %s\n' "$(<"$STATE_DIR/prompts")" >&2
+  exit 1
+fi
+printf 'PASS: the forwarding prompt is sudo whenever a terminal is attached\n'
+
+# A custom profile address never ends up inside its own lease range.
+printf '%s\n' 10.42.0.2/24 >"$STATE_DIR/addresses"
+: >"$STATE_DIR/nmcli-calls"
+printf '%s\n' test-password | bash "$PLUGIN" apply TestHotspot 2.4 1
+if ! grep -q 'ipv4.shared-dhcp-range 10.42.0.3,10.42.0.3' "$STATE_DIR/nmcli-calls"; then
+  printf 'FAIL: the lease range did not step past a .2 gateway: %s\n' "$(grep shared-dhcp-range "$STATE_DIR/nmcli-calls")" >&2
+  exit 1
+fi
+printf '%s\n' 10.42.0.254/24 >"$STATE_DIR/addresses"
+: >"$STATE_DIR/nmcli-calls"
+printf '%s\n' test-password | bash "$PLUGIN" apply TestHotspot 2.4 4
+if ! grep -q 'ipv4.shared-dhcp-range 10.42.0.250,10.42.0.253' "$STATE_DIR/nmcli-calls"; then
+  printf 'FAIL: the lease range did not sit below a .254 gateway\n' >&2
+  exit 1
+fi
+rm -f "$STATE_DIR/addresses"
+printf 'PASS: the lease range never includes the hotspot address\n'
+
+# Overlapping alias saves take turns, so none of them is lost.
+for i in $(seq 10 29); do
+  printf 'Device %s\n' "$i" | XDG_CONFIG_HOME="$STATE_DIR/concurrent" bash "$PLUGIN" alias-set "aa:bb:cc:dd:ee:$i" &
+done
+wait
+concurrent_file="$STATE_DIR/concurrent/omarchy/ujo4eva.network/participant-aliases.tsv"
+if [[ $(wc -l <"$concurrent_file") != 20 ]]; then
+  printf 'FAIL: overlapping alias saves lost names: %s of 20\n' "$(wc -l <"$concurrent_file")" >&2
+  exit 1
+fi
+printf 'PASS: overlapping alias saves keep every name\n'
+
+# An alias file that can't be read is left alone rather than rewritten.
+if (( EUID != 0 )); then
+  cp "$concurrent_file" "$STATE_DIR/aliases-before"
+  chmod 000 "$concurrent_file"
+  if printf 'New Name\n' | XDG_CONFIG_HOME="$STATE_DIR/concurrent" bash "$PLUGIN" alias-set aa:bb:cc:dd:ee:07 >/dev/null 2>&1; then
+    chmod 600 "$concurrent_file"
+    printf 'FAIL: saving into an unreadable alias file succeeded\n' >&2
+    exit 1
+  fi
+  chmod 600 "$concurrent_file"
+  if ! cmp -s "$concurrent_file" "$STATE_DIR/aliases-before"; then
+    printf 'FAIL: an unreadable alias file lost names\n' >&2
+    exit 1
+  fi
+  if compgen -G "$concurrent_file.??????" >/dev/null; then
+    printf 'FAIL: a refused alias save left a temp file behind\n' >&2
+    exit 1
+  fi
+fi
+printf 'PASS: an unreadable alias file is never rewritten\n'
+
+# The panel's first status after opening fills only fields the user hasn't
+# changed yet. Runs the panel's own updateHotspot against Model.js.
+node -e '
+const fs = require("fs")
+const vm = require("vm")
+const dir = process.argv[1]
+const Model = {}
+vm.runInNewContext(fs.readFileSync(dir + "/Model.js", "utf8") + "\nfor (const k of Object.keys(this)) Model[k] = this[k]", { Model })
+const panel = fs.readFileSync(dir + "/Panel.qml", "utf8")
+const source = panel.match(/function updateHotspot\(raw\) \{[\s\S]*?\n  \}/)
+if (!source) { process.stderr.write("FAIL: the panel has no updateHotspot\n"); process.exit(1) }
+const state = {
+  hotspot: {}, hotspotLoaded: false, hotspotEdited: true, hotspotSsid: "Typed Name", hotspotPassword: "typedpassword",
+  hotspotSavedSsid: "", hotspotSavedPassword: "", hotspotMaxClients: "", hotspotBand: "5", hotspotSecurity: "wpa3",
+  hotspotAvailableBands: [], Model, syncWifiNetworks() {}, refreshWifiList() {},
+}
+const run = raw => new Function("state", "raw", "with (state) {\n" + source[0] + "\nupdateHotspot(raw)\n}")(state, raw)
+const saved = "ap_capable\t1\nactive\t0\nconfigured\t1\niface\twlo1\nssid\tSaved Name\nband\t2.4\nap_bands\t2.4,5\npassword\tsavedpassword\nmax_clients\t4\nsecurity\tmixed\n"
+run(saved)
+if (state.hotspotSsid !== "Typed Name" || state.hotspotPassword !== "typedpassword" || state.hotspotBand !== "5" || state.hotspotSecurity !== "wpa3" || state.hotspotMaxClients !== "") {
+  process.stderr.write("FAIL: a late first status replaced fields the user had edited\n"); process.exit(1)
+}
+if (state.hotspotSavedSsid !== "Saved Name") { process.stderr.write("FAIL: the saved name did not follow the profile\n"); process.exit(1) }
+Object.assign(state, { hotspotLoaded: false, hotspotEdited: false })
+run(saved)
+if (state.hotspotSsid !== "Saved Name" || state.hotspotMaxClients !== "4" || state.hotspotSecurity !== "mixed") {
+  process.stderr.write("FAIL: an untouched panel was not filled from the profile\n"); process.exit(1)
+}
+' "${PLUGIN%/*}"
+printf 'PASS: a late first status keeps fields the user already edited\n'
