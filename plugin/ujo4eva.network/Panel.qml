@@ -2113,18 +2113,14 @@ Panel {
             verticalPadding: 0
             bordered: true
             hasCursor: root.cursorActive && root.focusSection === "hotspot" && root.hotspotFocusIndex === 2
+            // Button shows its own tooltip on hover.
+            tooltipText: "Show QR code"
             onClicked: root.summonHotspotQr()
             onHovered: function(isHovered) {
               if (!isHovered) return
               root.cursorActive = true
               root.focusSection = "hotspot"
               root.hotspotFocusIndex = 2
-            }
-
-            PanelToolTip {
-              visible: hotspotQrButton.containsMouse
-              text: "Show QR code"
-              fontFamily: root.bar.fontFamily
             }
           }
 
@@ -2144,18 +2140,13 @@ Panel {
             verticalPadding: 0
             bordered: true
             hasCursor: root.cursorActive && root.focusSection === "hotspot" && root.hotspotFocusIndex === 1
+            tooltipText: root.hotspotSetupOpen ? "Hide hotspot settings" : "Hotspot settings"
             onClicked: root.toggleHotspotSetup()
             onHovered: function(isHovered) {
               if (!isHovered) return
               root.cursorActive = true
               root.focusSection = "hotspot"
               root.hotspotFocusIndex = 1
-            }
-
-            PanelToolTip {
-              visible: hotspotCogButton.containsMouse
-              text: root.hotspotSetupOpen ? "Hide hotspot settings" : "Hotspot settings"
-              fontFamily: root.bar.fontFamily
             }
           }
 
