@@ -16,6 +16,30 @@ if [[ -x $PLUGIN_DIR/hotspot.sh ]]; then
   bash "$PLUGIN_DIR/hotspot.sh" stop >/dev/null 2>&1 || true
 fi
 
+# Host plumbing from install.sh: the hotspot-specific ufw rules and the policy
+# rule that keeps client traffic out of full-tunnel VPNs.
+ap_iface=$(hotspot_iface)
+if [[ -n $ap_iface ]]; then
+  if command -v ufw >/dev/null 2>&1; then
+    gateway=$(hotspot_gateway)
+    sudo ufw --force delete allow in on "$ap_iface" from any to any port 67 proto udp >/dev/null 2>&1 || true
+    sudo ufw --force delete allow in on "$ap_iface" to "$gateway" port 53 proto udp >/dev/null 2>&1 || true
+    sudo ufw --force delete allow in on "$ap_iface" to "$gateway" port 53 proto tcp >/dev/null 2>&1 || true
+    sudo ufw --force route delete allow in on "$ap_iface" >/dev/null 2>&1 || true
+    say "Removed the hotspot's ufw rules"
+  fi
+fi
+
+if [[ -f /etc/systemd/system/$WARP_UNIT ]]; then
+  sudo systemctl disable --now "$WARP_UNIT" >/dev/null 2>&1 || true
+  sudo rm -f "/etc/systemd/system/$WARP_UNIT"
+  sudo systemctl daemon-reload
+  say "Removed $WARP_UNIT"
+fi
+if [[ -n $ap_iface ]]; then
+  sudo ip rule del iif "$ap_iface" lookup main priority 1 >/dev/null 2>&1 || true
+fi
+
 if [[ -f $SHELL_JSON ]] && command -v jq >/dev/null 2>&1 &&
   jq -e --arg id "$PLUGIN_ID" '.. | objects | select(.id? == $id)' "$SHELL_JSON" >/dev/null 2>&1; then
   swap_bar_widget "$PLUGIN_ID" omarchy.network

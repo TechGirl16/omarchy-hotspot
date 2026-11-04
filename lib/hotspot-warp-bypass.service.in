@@ -1,0 +1,14 @@
+[Unit]
+Description=Keep Omarchy hotspot traffic out of full-tunnel VPN tunnels
+Documentation=https://github.com/ujo4eva/omarchy-hotspot
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/usr/sbin/ip rule add iif @IFACE@ lookup main priority 1
+ExecStop=-/usr/sbin/ip rule del iif @IFACE@ lookup main priority 1
+
+[Install]
+WantedBy=multi-user.target

@@ -7,6 +7,7 @@ PLUGIN_DIR="$OMARCHY_CONFIG/plugins/$PLUGIN_ID"
 MENU_FILE="$OMARCHY_CONFIG/extensions/omarchy-menu.jsonc"
 SHELL_JSON="$OMARCHY_CONFIG/shell.json"
 BACKUP_ROOT="$OMARCHY_CONFIG/backups/omarchy-hotspot"
+WARP_UNIT="hotspot-warp-bypass.service"
 BLOCK_BEGIN="// >>> omarchy-hotspot"
 BLOCK_END="// <<< omarchy-hotspot"
 
@@ -66,4 +67,29 @@ swap_bar_widget() {
     "$SHELL_JSON" >"$tmp"
   cat "$tmp" >"$SHELL_JSON"
   rm -f "$tmp"
+}
+
+# The Wi-Fi interface the hotspot uses: the profile's saved interface when it
+# exists, else the first Wi-Fi device NetworkManager knows about.
+hotspot_iface() {
+  local iface
+  iface=$(nmcli -g connection.interface-name connection show "$PROFILE" 2>/dev/null | head -n 1 || true)
+  if [[ -z $iface ]]; then
+    iface=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null |
+      awk -F: '$2 == "wifi" { print $1; exit }' || true)
+  fi
+  printf '%s' "$iface"
+}
+
+# The hotspot's own address on the shared /24; NetworkManager's default is
+# 10.42.0.1 when no profile has configured one yet.
+hotspot_gateway() {
+  local addr
+  addr=$(nmcli -g ipv4.addresses connection show "$PROFILE" 2>/dev/null | head -n 1 || true)
+  addr=${addr%% *}
+  if [[ -n $addr ]]; then
+    printf '%s' "${addr%%/*}"
+  else
+    printf '10.42.0.1'
+  fi
 }
