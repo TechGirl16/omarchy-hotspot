@@ -33,7 +33,8 @@ Panel {
   property var info: ({})  // { iface, type, ip, prefix, gateway, speed, duplex, ssid, signal, freq, bitrate, rx_bytes, tx_bytes, router_ping_ms, internet_ping_ms }
 
   // Throughput tracking. Rates are computed as deltas between successive
-  // `omarchy-network-status --verbose` samples (~1.5s apart via detailsPoll).
+  // status.sh samples (~1.5s apart via detailsPoll). It is the stock
+  // verbose status, plus a fallback internet ping when 1.1.1.1 is silent.
   // We hold "prev" alongside a timestamp so the first sample after open or
   // after an interface switch doesn't manufacture a spike.
   property real prevRxBytes: 0
@@ -156,6 +157,7 @@ Panel {
   // the key catcher's binding, so it reports its focus here.
   property bool hotspotAliasFieldFocused: false
   readonly property string hotspotScript: Quickshell.env("HOME") + "/.config/omarchy/plugins/ujo4eva.network/hotspot.sh"
+  readonly property string statusScript: Quickshell.env("HOME") + "/.config/omarchy/plugins/ujo4eva.network/status.sh"
   readonly property bool hotspotAvailable: hotspot.ap_capable === "1"
   readonly property bool hotspotActive: hotspot.active === "1"
   readonly property bool hotspotConfigured: hotspot.configured === "1"
@@ -1183,7 +1185,7 @@ Panel {
   // Pulls everything we want about the active route's interface in one shot.
   Process {
     id: detailsProc
-    command: ["omarchy-network-status", "--verbose"]
+    command: ["bash", root.statusScript]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.updateDetails(text)
