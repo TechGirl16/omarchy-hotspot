@@ -17,22 +17,25 @@ if [[ -x $PLUGIN_DIR/hotspot.sh ]]; then
 fi
 
 # Host plumbing from install.sh: the hotspot-specific ufw rules and the policy
-# rule that keeps client traffic out of full-tunnel VPNs.
-ap_iface=$(hotspot_iface)
-if [[ -n $ap_iface ]]; then
-  if command -v ufw >/dev/null 2>&1; then
-    gateway=$(hotspot_gateway)
-    sudo ufw --force delete allow in on "$ap_iface" from any to any port 67 proto udp >/dev/null 2>&1 || true
-    sudo ufw --force delete allow in on "$ap_iface" to "$gateway" port 53 proto udp >/dev/null 2>&1 || true
-    sudo ufw --force delete allow in on "$ap_iface" to "$gateway" port 53 proto tcp >/dev/null 2>&1 || true
-    sudo ufw --force route delete allow in on "$ap_iface" >/dev/null 2>&1 || true
-    say "Removed the hotspot's ufw rules"
-  fi
+# rule that keeps client traffic out of full-tunnel VPNs. Prefer the interface
+# and subnet the last install recorded; fall back to the current hotspot
+# interface when no unit is installed.
+ap_iface="" subnet=""
+read -r ap_iface subnet <<<"$(installed_unit_scope)" || true
+if [[ -z $ap_iface ]]; then
+  ap_iface=$(hotspot_iface)
+fi
+if [[ -n $ap_iface && -z $subnet ]]; then
+  subnet=$(hotspot_subnet)
+fi
+if [[ -n $ap_iface ]] && command -v ufw >/dev/null 2>&1; then
+  hotspot_ufw_delete_all "$ap_iface" "$subnet"
+  say "Removed the hotspot's ufw rules"
 fi
 
-if [[ -f /etc/systemd/system/$WARP_UNIT ]]; then
+if [[ -f $SYSTEMD_DIR/$WARP_UNIT ]]; then
   sudo systemctl disable --now "$WARP_UNIT" >/dev/null 2>&1 || true
-  sudo rm -f "/etc/systemd/system/$WARP_UNIT"
+  sudo rm -f "$SYSTEMD_DIR/$WARP_UNIT"
   sudo systemctl daemon-reload
   say "Removed $WARP_UNIT"
 fi

@@ -1,3 +1,6 @@
+# Managed by omarchy-hotspot's installer. Record the rule's scope so a
+# re-install can remove it after the interface or subnet changes.
+# omarchy-hotspot-scope: iface=@IFACE@ subnet=@SUBNET@
 [Unit]
 Description=Keep Omarchy hotspot traffic out of full-tunnel VPN tunnels
 Documentation=https://github.com/ujo4eva/omarchy-hotspot

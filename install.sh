@@ -15,14 +15,6 @@ source "$REPO/lib/common.sh"
 
 need() { command -v "$1" >/dev/null 2>&1; }
 
-ufw_allow() {
-  sudo ufw allow "$@" >/dev/null || warn "ufw: couldn't add: allow $*"
-}
-
-ufw_route() {
-  sudo ufw route allow "$@" >/dev/null || warn "ufw: couldn't add: route allow $*"
-}
-
 need omarchy-shell || fail "omarchy-shell not found; this needs an Omarchy release with the Quickshell bar"
 need nmcli || fail "nmcli not found; the hotspot is driven by NetworkManager"
 need jq || fail "jq not found (sudo pacman -S jq)"
@@ -48,19 +40,34 @@ fi
 # host-wide defaults still cut clients off on some machines: ufw drops forwarded
 # traffic and sends DHCP (port 67) to its policy, and full-tunnel VPNs such as
 # Cloudflare WARP route forwarded client packets into the tunnel. Open exactly
-# what the hotspot needs, only on its own interface.
+# what the hotspot needs, scoped to its own interface and subnet.
 ap_iface=$(hotspot_iface)
 if [[ -z $ap_iface ]]; then
   warn "couldn't find a Wi-Fi interface; skipped the firewall and VPN routing setup"
 else
+  subnet=$(hotspot_subnet)
+
+  # A previous install records its interface and subnet in the unit. Remove
+  # those rules first, so changing the Wi-Fi interface or address doesn't
+  # strand rules that uninstall can no longer match.
+  prev_iface="" prev_subnet=""
+  read -r prev_iface prev_subnet <<<"$(installed_unit_scope)" || true
+  if [[ -n $prev_iface && ($prev_iface != "$ap_iface" || $prev_subnet != "$subnet") ]]; then
+    [[ -n $prev_subnet ]] || prev_subnet=$subnet
+    if need ufw; then
+      hotspot_ufw_delete_all "$prev_iface" "$prev_subnet"
+      say "Removed the old ufw rules for $prev_iface"
+    fi
+    if [[ $prev_iface != "$ap_iface" ]]; then
+      sudo ip rule del iif "$prev_iface" lookup main priority 1 2>/dev/null || true
+    fi
+  fi
+
   if need ufw; then
-    gateway=$(hotspot_gateway)
-    say "Opening ufw for hotspot clients on $ap_iface"
-    # DHCP requests are broadcast, so this rule cannot be narrowed to the gateway.
-    ufw_allow in on "$ap_iface" from any to any port 67 proto udp
-    ufw_allow in on "$ap_iface" to "$gateway" port 53 proto udp
-    ufw_allow in on "$ap_iface" to "$gateway" port 53 proto tcp
-    ufw_route in on "$ap_iface"
+    say "Opening ufw for hotspot clients on $ap_iface ($subnet)"
+    # DHCP requests are broadcast, so that rule cannot be narrowed to the
+    # subnet; DNS and forwarding are scoped to the clients.
+    hotspot_ufw_add_all "$ap_iface" "$subnet"
   else
     say "ufw not installed; skipping firewall rules"
   fi
@@ -71,12 +78,15 @@ else
   say "Keeping hotspot traffic out of full-tunnel VPNs"
   sudo ip rule add iif "$ap_iface" lookup main priority 1 2>/dev/null || true
   unit_tmp=$(mktemp)
-  sed "s|@IFACE@|$ap_iface|g" "$REPO/lib/$WARP_UNIT.in" >"$unit_tmp"
-  sudo install -m 0644 "$unit_tmp" "/etc/systemd/system/$WARP_UNIT"
+  sed -e "s|@IFACE@|$ap_iface|g" -e "s|@SUBNET@|$subnet|g" "$REPO/lib/$WARP_UNIT.in" >"$unit_tmp"
+  sudo install -m 0644 "$unit_tmp" "$SYSTEMD_DIR/$WARP_UNIT"
   rm -f "$unit_tmp"
   sudo systemctl daemon-reload
-  sudo systemctl enable --now "$WARP_UNIT" >/dev/null 2>&1 ||
-    warn "couldn't enable $WARP_UNIT; the rule is active for this boot only"
+  # enable --now leaves an already-active unit alone, so restart it explicitly
+  # to replace the policy rule when the interface or subnet changed.
+  sudo systemctl enable "$WARP_UNIT" >/dev/null 2>&1 || true
+  sudo systemctl restart "$WARP_UNIT" >/dev/null 2>&1 ||
+    warn "couldn't restart $WARP_UNIT; the rule is active for this boot only"
 fi
 
 # 2. Plugin. Back up a differing copy outside plugins/ so the shell never loads

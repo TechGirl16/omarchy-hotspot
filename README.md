@@ -45,9 +45,12 @@ NetworkManager's shared mode runs DHCP and NATs, but a firewall with a
 default-deny forward policy (`ufw`) drops the clients, and ufw has a built-in
 rule that sends DHCP (port 67) straight to its policy. A full-tunnel VPN also
 routes forwarded client packets into its tunnel. The installer opens exactly
-the ports the hotspot needs, only on the hotspot interface, and adds the
-routing rule the VPN would otherwise swallow. Re-run it if you change the
-Wi-Fi interface.
+the ports the hotspot needs, scoped to the hotspot interface and client subnet,
+and adds the routing rule the VPN would otherwise swallow. Re-run it if you
+change the Wi-Fi interface.
+
+The firewall rules and the routing unit are installed for everyone, whether or
+not you use a VPN, and installing asks for sudo to add them.
 
 ## Use
 
